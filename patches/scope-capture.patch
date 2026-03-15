@@ -1,0 +1,236 @@
+diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp/SID.h libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp/SID.h
+--- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp/SID.h	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp/SID.h	2026-03-15 12:00:00.000000000 +0100
+@@ -123,6 +123,14 @@
+      */
+     float oscDAC[4096];
+
++    /// Per-voice output buffers for waveform visualization (decimated to audio rate)
++    static constexpr int VOICE_BUFFER_SIZE = 4096;
++    short voiceBuffer[3][VOICE_BUFFER_SIZE];
++    int voiceBufferPos = 0;
++
++    int voiceScopeDecimation = 20;   ///< Clock ticks per scope sample (set by setSamplingParameters)
++    int voiceScopeCounter = 0;       ///< Decimation counter
++
+ private:
+     /**
+      * Age the bus value and zero it if it's TTL has expired.
+@@ -288,6 +296,28 @@
+      * @param enable false to turn off filter emulation
+      */
+     void enableFilter(bool enable);
++
++    /**
++     * Get per-voice audio buffer for waveform visualization.
++     *
++     * @param voiceNum voice number (0-2)
++     * @return pointer to the voice buffer, or nullptr if invalid
++     */
++    const short* getVoiceBuffer(int voiceNum) const
++    {
++        if (voiceNum < 0 || voiceNum > 2) return nullptr;
++        return voiceBuffer[voiceNum];
++    }
++
++    /**
++     * Get the current position in voice buffers.
++     */
++    int getVoiceBufferPos() const { return voiceBufferPos; }
++
++    /**
++     * Get the voice buffer size.
++     */
++    static constexpr int getVoiceBufferSize() { return VOICE_BUFFER_SIZE; }
+ };
+
+ } // namespace reSIDfp
+@@ -343,6 +373,22 @@
+                 voice[1].envelope()->clock();
+                 voice[2].envelope()->clock();
+
++                // Capture per-voice output decimated to approximately audio sample rate.
++                // voiceScopeDecimation is set by setSamplingParameters to clockFreq/sampleFreq.
++                if (++voiceScopeCounter >= voiceScopeDecimation)
++                {
++                    voiceScopeCounter = 0;
++                    auto getVoiceOut = [](Voice& v) -> short {
++                        int wav = static_cast<int>(v.wave()->output()) - 2048;
++                        int env = v.envelope()->output();
++                        return static_cast<short>((wav * env) / 8);
++                    };
++                    voiceBuffer[0][voiceBufferPos] = getVoiceOut(voice[0]);
++                    voiceBuffer[1][voiceBufferPos] = getVoiceOut(voice[1]);
++                    voiceBuffer[2][voiceBufferPos] = getVoiceOut(voice[2]);
++                    voiceBufferPos = (voiceBufferPos + 1) & (VOICE_BUFFER_SIZE - 1);
++                }
++
+                 const int sidOutput = static_cast<int>(filter->clock(voice[0], voice[1], voice[2]));
+                 const int c64Output = externalFilter.clock(sidOutput + INT16_MIN);
+                 if (unlikely(resampler->input(c64Output)))
+diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp/SID.cpp libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp/SID.cpp
+--- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp/SID.cpp	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp/SID.cpp	2026-03-15 12:00:00.000000000 +0100
+@@ -487,6 +487,10 @@
+ void SID::setSamplingParameters(double clockFrequency, SamplingMethod method, double samplingFrequency)
+ {
+     externalFilter.setClockFrequency(clockFrequency);
++
++    // Set scope decimation ratio: capture one voice sample per audio output sample
++    voiceScopeDecimation = static_cast<int>(clockFrequency / samplingFrequency);
++    if (voiceScopeDecimation < 1) voiceScopeDecimation = 1;
+
+     switch (method)
+     {
+diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-builder.cpp libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-builder.cpp
+--- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-builder.cpp	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-builder.cpp	2026-03-15 12:00:00.000000000 +0100
+@@ -95,3 +95,94 @@
+     for (libsidplayfp::sidemu* e: sidobjs)
+         static_cast<libsidplayfp::ReSIDfp*>(e)->combinedWaveforms(cws);
+ }
++
++unsigned int ReSIDfpBuilder::getScopeData(int channel, float* buffer, unsigned int numSamples)
++{
++    // Map channel to SID instance and voice
++    // Channels 0-2 = SID 0, 3-5 = SID 1, 6-8 = SID 2
++    int sidIdx = channel / 3;
++    int voiceIdx = channel % 3;
++
++    int i = 0;
++    for (libsidplayfp::sidemu* e : sidobjs)
++    {
++        if (i == sidIdx)
++        {
++            auto* emu = static_cast<libsidplayfp::ReSIDfp*>(e);
++            const short* voiceBuf = emu->getVoiceBuffer(voiceIdx);
++            int writePos = emu->getVoiceBufferPos();
++            int bufSize = emu->getVoiceBufferSize();
++
++            if (voiceBuf == nullptr || bufSize <= 0)
++                return 0;
++
++            if (numSamples > static_cast<unsigned int>(bufSize))
++                numSamples = static_cast<unsigned int>(bufSize);
++
++            // Per-channel read position tracking.
++            // Instead of always reading the most recent N samples (which causes
++            // phase jumps when the read rate doesn't match the write rate),
++            // we maintain a sliding output buffer that appends only NEW samples
++            // since the last call. This provides continuous, phase-coherent data.
++            static float outputBuf[9][4096];     // 3 SIDs * 3 voices max
++            static int lastReadPos[9] = {0};
++            static bool initialized[9] = {false};
++
++            int ch = sidIdx * 3 + voiceIdx;
++            if (ch >= 9) return 0;
++
++            if (!initialized[ch])
++            {
++                // First call: fill with the most recent data
++                lastReadPos[ch] = writePos;
++                const float norm = 1.0f / 65280.0f;
++                int readPos = (writePos - static_cast<int>(numSamples) + bufSize) & (bufSize - 1);
++                for (unsigned int s = 0; s < numSamples; s++)
++                {
++                    float sample = static_cast<float>(voiceBuf[readPos]) * norm;
++                    if (sample > 1.0f) sample = 1.0f;
++                    else if (sample < -1.0f) sample = -1.0f;
++                    outputBuf[ch][s] = sample;
++                    readPos = (readPos + 1) & (bufSize - 1);
++                }
++                initialized[ch] = true;
++            }
++            else
++            {
++                // Calculate how many new samples the writer has produced
++                int newSamples = (writePos - lastReadPos[ch] + bufSize) & (bufSize - 1);
++
++                // Clamp to buffer size (if we fell too far behind, skip ahead)
++                if (newSamples > static_cast<int>(numSamples))
++                    newSamples = static_cast<int>(numSamples);
++
++                if (newSamples > 0)
++                {
++                    // Shift existing data left to make room for new samples
++                    int keep = static_cast<int>(numSamples) - newSamples;
++                    for (int s = 0; s < keep; s++)
++                        outputBuf[ch][s] = outputBuf[ch][s + newSamples];
++
++                    // Append new samples at the end
++                    const float norm = 1.0f / 65280.0f;
++                    int readPos = (writePos - newSamples + bufSize) & (bufSize - 1);
++                    for (int s = 0; s < newSamples; s++)
++                    {
++                        float sample = static_cast<float>(voiceBuf[readPos]) * norm;
++                        if (sample > 1.0f) sample = 1.0f;
++                        else if (sample < -1.0f) sample = -1.0f;
++                        outputBuf[ch][keep + s] = sample;
++                        readPos = (readPos + 1) & (bufSize - 1);
++                    }
++                }
++            }
++
++            lastReadPos[ch] = writePos;
++            memcpy(buffer, outputBuf[ch], numSamples * sizeof(float));
++            return numSamples;
++        }
++        i++;
++    }
++
++    return 0;
++}
+diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.cpp
+--- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.cpp	2026-03-15 12:00:00.000000000 +0100
+@@ -197,4 +197,14 @@
+     m_status = true;
+ }
+
++const short* ReSIDfp::getVoiceBuffer(int voiceNum) const
++{
++    return m_sid.getVoiceBuffer(voiceNum);
++}
++
++int ReSIDfp::getVoiceBufferPos() const
++{
++    return m_sid.getVoiceBufferPos();
++}
++
+ }
+diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.h libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.h
+--- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.h	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.h	2026-03-15 12:00:00.000000000 +0100
+@@ -72,6 +72,11 @@
+     void filter6581Range(double adjustment);
+     void filter8580Curve(double filterCurve);
+     void combinedWaveforms(SidConfig::sid_cw_t cws);
++
++    // Voice buffer access for waveform visualization
++    const short* getVoiceBuffer(int voiceNum) const;
++    int getVoiceBufferPos() const;
++    int getVoiceBufferSize() const { return reSIDfp::SID::getVoiceBufferSize(); }
+ };
+
+ }
+diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp.h libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp.h
+--- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp.h	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp.h	2026-03-15 12:00:00.000000000 +0100
+@@ -88,6 +88,17 @@
+      */
+     void combinedWaveformsStrength(SidConfig::sid_cw_t cws);
+
++    /**
++     * Get per-voice audio buffer for waveform visualization.
++     * Channels are mapped across SID instances: 0-2 = SID 0, 3-5 = SID 1, 6-8 = SID 2.
++     *
++     * @param channel channel index (0-8 for up to 3 SIDs)
++     * @param buffer output buffer for float samples [-1.0, 1.0]
++     * @param numSamples maximum number of samples to retrieve
++     * @return actual number of samples written to buffer
++     */
++    unsigned int getScopeData(int channel, float* buffer, unsigned int numSamples);
++
+     //@}
+ };
+
