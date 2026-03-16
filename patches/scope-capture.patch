@@ -4,7 +4,7 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp/SID.h libsidp
 @@ -123,6 +123,14 @@
       */
      float oscDAC[4096];
-
+ 
 +    /// Per-voice output buffers for waveform visualization (decimated to audio rate)
 +    static constexpr int VOICE_BUFFER_SIZE = 4096;
 +    short voiceBuffer[3][VOICE_BUFFER_SIZE];
@@ -43,12 +43,12 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp/SID.h libsidp
 +     */
 +    static constexpr int getVoiceBufferSize() { return VOICE_BUFFER_SIZE; }
  };
-
+ 
  } // namespace reSIDfp
 @@ -343,6 +373,22 @@
                  voice[1].envelope()->clock();
                  voice[2].envelope()->clock();
-
+ 
 +                // Capture per-voice output decimated to approximately audio sample rate.
 +                // voiceScopeDecimation is set by setSamplingParameters to clockFreq/sampleFreq.
 +                if (++voiceScopeCounter >= voiceScopeDecimation)
@@ -79,7 +79,7 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp/SID.cpp libsi
 +    // Set scope decimation ratio: capture one voice sample per audio output sample
 +    voiceScopeDecimation = static_cast<int>(clockFrequency / samplingFrequency);
 +    if (voiceScopeDecimation < 1) voiceScopeDecimation = 1;
-
+ 
      switch (method)
      {
 diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-builder.cpp libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-builder.cpp
@@ -186,7 +186,7 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp libsi
 @@ -197,4 +197,14 @@
      m_status = true;
  }
-
+ 
 +const short* ReSIDfp::getVoiceBuffer(int voiceNum) const
 +{
 +    return m_sid.getVoiceBuffer(voiceNum);
@@ -211,7 +211,7 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.h libsidp
 +    int getVoiceBufferPos() const;
 +    int getVoiceBufferSize() const { return reSIDfp::SID::getVoiceBufferSize(); }
  };
-
+ 
  }
 diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp.h libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp.h
 --- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp.h	2025-12-23 15:57:36.000000000 +0100
@@ -219,7 +219,7 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp.h libsidplayf
 @@ -88,6 +88,17 @@
       */
      void combinedWaveformsStrength(SidConfig::sid_cw_t cws);
-
+ 
 +    /**
 +     * Get per-voice audio buffer for waveform visualization.
 +     * Channels are mapped across SID instances: 0-2 = SID 0, 3-5 = SID 1, 6-8 = SID 2.
@@ -233,4 +233,4 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp.h libsidplayf
 +
      //@}
  };
-
+ 
