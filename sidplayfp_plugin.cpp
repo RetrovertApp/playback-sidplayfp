@@ -5,7 +5,6 @@
 // Based on libsidplayfp by Leandro Nini.
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#include <retrovert/io.h>
 #include <retrovert/log.h>
 #include <retrovert/metadata.h>
 #include <retrovert/playback.h>
@@ -19,6 +18,8 @@
 #include <sidplayfp/SidTune.h>
 #include <sidplayfp/SidTuneInfo.h>
 
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -28,7 +29,6 @@
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-RV_PLUGIN_USE_IO_API();
 RV_PLUGIN_USE_LOG_API();
 RV_PLUGIN_USE_METADATA_API();
 
@@ -85,13 +85,27 @@ static int sidplayfp_destroy(void* user_data) {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Check if a file is an Atari ST executable (TOS program).
+// These share the .prg extension with C64 programs but contain 68000 code.
+static bool is_atari_st_executable(const char* url) {
+    FILE* f = fopen(url, "rb");
+    if (!f) {
+        return false;
+    }
+    uint8_t header[2];
+    bool is_st = (fread(header, 1, 2, f) == 2 && header[0] == 0x60 && header[1] == 0x1a);
+    fclose(f);
+    return is_st;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 static int sidplayfp_open(void* user_data, const char* url, uint32_t subsong, const RVService* service_api) {
     (void)service_api;
 
-    RVIoReadUrlResult read_res;
-
-    if ((read_res = rv_io_read_url_to_memory(url)).data == nullptr) {
-        rv_error("Failed to load %s to memory", url);
+    // Reject Atari ST executables which share the .prg extension with C64 programs
+    if (is_atari_st_executable(url)) {
+        rv_error("Not a C64 file (Atari ST executable)");
         return -1;
     }
 
@@ -107,16 +121,12 @@ static int sidplayfp_open(void* user_data, const char* url, uint32_t subsong, co
     // Free previous song data
     delete[] data->song_data;
     data->song_data = nullptr;
+    data->song_data_size = 0;
 
-    // Keep a copy of the song data (SidTune doesn't copy it)
-    data->song_data_size = static_cast<uint32_t>(read_res.data_size);
-    data->song_data = new uint8_t[data->song_data_size];
-    memcpy(data->song_data, read_res.data, data->song_data_size);
-
-    rv_io_free_url_to_memory(read_res.data);
-
-    // Load tune from memory
-    data->tune = new SidTune(data->song_data, data->song_data_size);
+    // Load tune from file. Using the filename-based constructor enables format
+    // detection for PRG, P00, and C64 files (the buffer-based constructor only
+    // supports PSID and MUS formats).
+    data->tune = new SidTune(url);
 
     if (!data->tune->getStatus()) {
         rv_error("Failed to load SID tune: %s", data->tune->statusString());
@@ -191,7 +201,6 @@ static void sidplayfp_close(void* user_data) {
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static RVProbeResult sidplayfp_probe_can_play(uint8_t* d, uint64_t data_size, const char* url, uint64_t total_size) {
-    (void)url;
     (void)total_size;
 
     if (data_size < 4) {
@@ -201,6 +210,26 @@ static RVProbeResult sidplayfp_probe_can_play(uint8_t* d, uint64_t data_size, co
     // Check for PSID/RSID header
     if ((d[0] == 'P' || d[0] == 'R') && d[1] == 'S' && d[2] == 'I' && d[3] == 'D') {
         return RVProbeResult_Supported;
+    }
+
+    // Reject Atari ST executables (TOS magic 0x601a) which share .prg extension
+    if (data_size >= 2 && d[0] == 0x60 && d[1] == 0x1a) {
+        return RVProbeResult_Unsupported;
+    }
+
+    // For .prg/.p00/.c64 files, return Unsure so the file-based loader can try them
+    if (url != nullptr) {
+        const char* dot = strrchr(url, '.');
+        if (dot != nullptr) {
+            dot++;
+            char lower[4] = { 0 };
+            for (int i = 0; i < 3 && dot[i]; i++) {
+                lower[i] = (char)tolower((unsigned char)dot[i]);
+            }
+            if (strcmp(lower, "prg") == 0 || strcmp(lower, "p00") == 0 || strcmp(lower, "c64") == 0) {
+                return RVProbeResult_Unsure;
+            }
+        }
     }
 
     return RVProbeResult_Unsupported;
@@ -251,23 +280,15 @@ static int64_t sidplayfp_seek(void* user_data, int64_t ms) {
 static int sidplayfp_metadata(const char* url, const RVService* service_api) {
     (void)service_api;
 
-    RVIoReadUrlResult read_res;
-
-    if ((read_res = rv_io_read_url_to_memory(url)).data == nullptr) {
-        rv_error("Failed to load %s to memory", url);
-        return -1;
-    }
-
-    SidTune tune(static_cast<const uint8_t*>(read_res.data), static_cast<uint32_t>(read_res.data_size));
+    // Use filename-based constructor for PRG/P00/C64 format detection
+    SidTune tune(url);
 
     if (!tune.getStatus()) {
-        rv_io_free_url_to_memory(read_res.data);
         return -1;
     }
 
     const SidTuneInfo* info = tune.getInfo();
     if (!info) {
-        rv_io_free_url_to_memory(read_res.data);
         return -1;
     }
 
@@ -322,7 +343,6 @@ static int sidplayfp_metadata(const char* url, const RVService* service_api) {
         }
     }
 
-    rv_io_free_url_to_memory(read_res.data);
     return 0;
 }
 
@@ -339,7 +359,6 @@ static void sidplayfp_event(void* user_data, uint8_t* event_data, uint64_t len) 
 
 static void sidplayfp_static_init(const RVService* service_api) {
     rv_init_log_api(service_api);
-    rv_init_io_api(service_api);
     rv_init_metadata_api(service_api);
 }
 
