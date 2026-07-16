@@ -364,24 +364,35 @@ static void sidplayfp_static_init(const RVService* service_api) {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static uint32_t sidplayfp_get_scope_data(void* user_data, int channel, float* buffer, uint32_t num_samples) {
+// Visualization: metadata-only model. sidplayfp exposes a per-voice scope but no
+// pattern grid, so it advertises Scope only and leaves the pattern getters NULL.
+// The scope channel count is dynamic (3 voices per SID) and exceeds the old
+// RV_MAX_CHANNELS=8 cap for multi-SID tunes (up to 3 SIDs * 3 = 9 voices).
+
+static bool sidplayfp_get_structure(void* user_data, RVVizInfo* out) {
     SidPlayData* data = static_cast<SidPlayData*>(user_data);
-    if (data == nullptr || data->builder == nullptr || buffer == nullptr) {
-        return 0;
+    if (data == nullptr || data->tune == nullptr || out == nullptr) {
+        return false;
     }
 
-    return data->builder->getScopeData(channel, buffer, num_samples);
+    out->caps = RVVizCaps_Scope;
+    out->scroll_mode = RVScrollMode_Synchronized;
+    out->pattern_channel_count = 0;
+    out->scope_channel_count = static_cast<uint32_t>(data->sid_count) * 3;
+    out->column_count = 0;
+    return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static uint32_t sidplayfp_get_scope_channel_names(void* user_data, const char** names, uint32_t max_channels) {
+static uint32_t sidplayfp_get_scope_channels(void* user_data, RVChannelDesc* out, uint32_t cap) {
     SidPlayData* data = static_cast<SidPlayData*>(user_data);
+    if (out == nullptr) {
+        return 0;
+    }
 
-    // Single SID: "Voice 1", "Voice 2", "Voice 3"
+    // Single SID: "Voice 1".."Voice 3"; multi-SID: "SID n Vm".
     static const char* s_single_names[] = { "Voice 1", "Voice 2", "Voice 3" };
-
-    // Multi SID: "SID 1 V1" .. "SID 3 V3"
     static const char* s_multi_names[] = {
         "SID 1 V1", "SID 1 V2", "SID 1 V3", "SID 2 V1", "SID 2 V2", "SID 2 V3", "SID 3 V1", "SID 3 V2", "SID 3 V3",
     };
@@ -392,46 +403,35 @@ static uint32_t sidplayfp_get_scope_channel_names(void* user_data, const char** 
 
     const char** src = (sid_count > 1) ? s_multi_names : s_single_names;
     uint32_t count = static_cast<uint32_t>(sid_count) * 3;
+    if (count > cap)
+        count = cap;
 
-    if (count > max_channels)
-        count = max_channels;
-
-    for (uint32_t i = 0; i < count; i++)
-        names[i] = src[i];
+    for (uint32_t i = 0; i < count; i++) {
+        memset(out[i].name, 0, sizeof(out[i].name));
+        strncpy(reinterpret_cast<char*>(out[i].name), src[i], sizeof(out[i].name) - 1);
+        out[i].scope_width = 0;
+    }
 
     return count;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static int sidplayfp_get_tracker_info(void* user_data, RVTrackerInfo* info) {
+static void sidplayfp_set_scope_enabled(void* user_data, bool on) {
+    // ReSIDfp captures per-voice buffers unconditionally; nothing to toggle.
+    (void)user_data;
+    (void)on;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+static uint32_t sidplayfp_get_scope_samples(void* user_data, int32_t channel, float* out, uint32_t cap) {
     SidPlayData* data = static_cast<SidPlayData*>(user_data);
-
-    if (data == nullptr || data->tune == nullptr || info == nullptr) {
-        return -1;
+    if (data == nullptr || data->builder == nullptr || out == nullptr) {
+        return 0;
     }
 
-    memset(info, 0, sizeof(RVTrackerInfo));
-
-    const SidTuneInfo* tune_info = data->tune->getInfo();
-    if (tune_info == nullptr) {
-        return -1;
-    }
-
-    // Info strings: 0=title, 1=author, 2=released
-    if (tune_info->numberOfInfoStrings() > 0 && tune_info->infoString(0)[0] != '\0') {
-        strncpy(info->song_name, tune_info->infoString(0), sizeof(info->song_name) - 1);
-    }
-    if (tune_info->numberOfInfoStrings() > 1 && tune_info->infoString(1)[0] != '\0') {
-        strncpy(info->artist_name, tune_info->infoString(1), sizeof(info->artist_name) - 1);
-    }
-    if (tune_info->numberOfInfoStrings() > 2 && tune_info->infoString(2)[0] != '\0') {
-        strncpy(info->game_name, tune_info->infoString(2), sizeof(info->game_name) - 1);
-    }
-
-    info->num_channels = data->sid_count * 3;
-
-    return 0;
+    return data->builder->getScopeData(channel, out, cap);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -453,14 +453,19 @@ static RVPlaybackPlugin g_sidplayfp_plugin = {
     sidplayfp_metadata,
     sidplayfp_static_init,
     nullptr, // settings_updated
-
-    // Tracker visualization API
-    sidplayfp_get_tracker_info,
-    nullptr, // get_pattern_cell
-    nullptr, // get_pattern_num_rows
-    sidplayfp_get_scope_data,
     nullptr, // static_destroy
-    sidplayfp_get_scope_channel_names,
+
+    // Visualization: metadata-only + scope (no pattern grid).
+    sidplayfp_get_structure,
+    nullptr, // get_columns
+    nullptr, // get_pattern_channels
+    sidplayfp_get_scope_channels,
+    nullptr, // get_position
+    nullptr, // get_channel_rows
+    nullptr, // get_cells
+    sidplayfp_set_scope_enabled,
+    sidplayfp_get_scope_samples,
+    nullptr, // get_vu
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
