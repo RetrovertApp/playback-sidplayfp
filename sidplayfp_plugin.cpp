@@ -246,7 +246,8 @@ static RVReadInfo sidplayfp_read_data(void* user_data, RVReadData dest) {
     }
 
     // Run emulator for one batch (play() caps at 20000 cycles internally)
-    uint32_t max_frames = dest.channels_output_max_bytes_size / (sizeof(int16_t) * 2);
+    uint32_t capacity_frames = dest.channels_output_max_bytes_size / (sizeof(int16_t) * 2);
+    uint32_t max_frames = dest.info.frame_count < capacity_frames ? dest.info.frame_count : capacity_frames;
     unsigned int cycles = max_frames * 21; // ~20.5 cycles/sample
     int samples = data->engine->play(cycles);
 
