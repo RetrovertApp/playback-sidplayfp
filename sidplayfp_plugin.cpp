@@ -32,6 +32,11 @@
 RV_PLUGIN_USE_LOG_API();
 RV_PLUGIN_USE_METADATA_API();
 
+// Frames a single play() batch can generate. play() caps itself at 20000 cycles and the
+// slowest supported clock (PAL, 985248 Hz) needs ~20.5 cycles per frame at 48 kHz, so a
+// batch never exceeds ~976 frames; the rest is headroom.
+#define PENDING_FRAMES_MAX 2048
+
 struct SidPlayData {
     sidplayfp* engine;
     SidTune* tune;
@@ -39,6 +44,14 @@ struct SidPlayData {
     uint8_t* song_data;
     uint32_t song_data_size;
     int sid_count; // Number of SID chips used by current tune (1-3)
+    // A play() batch rounds up to whole cycles and so can generate a frame or two beyond
+    // what the host asked for. play() resets the chip buffer, so the surplus is staged
+    // here and handed out on the following reads instead of being returned over the
+    // request (an ABI violation) or dropped (a click).
+    int16_t pending[PENDING_FRAMES_MAX * 2];
+    uint32_t pending_frames;
+    uint32_t pending_read; // frames already handed out from the front of `pending`
+    bool finished;
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -123,6 +136,10 @@ static int sidplayfp_open(void* user_data, const char* url, uint32_t subsong, co
     data->song_data = nullptr;
     data->song_data_size = 0;
 
+    data->pending_frames = 0;
+    data->pending_read = 0;
+    data->finished = false;
+
     // Load tune from file. Using the filename-based constructor enables format
     // detection for PRG, P00, and C64 files (the buffer-based constructor only
     // supports PSID and MUS formats).
@@ -196,6 +213,10 @@ static void sidplayfp_close(void* user_data) {
     delete[] data->song_data;
     data->song_data = nullptr;
     data->song_data_size = 0;
+
+    data->pending_frames = 0;
+    data->pending_read = 0;
+    data->finished = false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -237,6 +258,21 @@ static RVProbeResult sidplayfp_probe_can_play(uint8_t* d, uint64_t data_size, co
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Hands the host up to `max_frames` staged frames and keeps whatever is left.
+static uint32_t drain_pending(SidPlayData* data, int16_t* output, uint32_t max_frames) {
+    uint32_t available = data->pending_frames - data->pending_read;
+    uint32_t taken = available < max_frames ? available : max_frames;
+
+    memcpy(output, data->pending + data->pending_read * 2, taken * 2 * sizeof(int16_t));
+    data->pending_read += taken;
+    if (data->pending_read == data->pending_frames) {
+        data->pending_frames = 0;
+        data->pending_read = 0;
+    }
+
+    return taken;
+}
+
 static RVReadInfo sidplayfp_read_data(void* user_data, RVReadData dest) {
     SidPlayData* data = static_cast<SidPlayData*>(user_data);
     RVAudioFormat format = { RVAudioStreamFormat_S16, 2, FREQ };
@@ -245,9 +281,27 @@ static RVReadInfo sidplayfp_read_data(void* user_data, RVReadData dest) {
         return RVReadInfo { format, 0, RVReadStatus_Error };
     }
 
-    // Run emulator for one batch (play() caps at 20000 cycles internally)
+    // The host advertises a byte capacity that may exceed what the requested frames
+    // occupy; neither bound may be crossed.
     uint32_t capacity_frames = dest.channels_output_max_bytes_size / (sizeof(int16_t) * 2);
     uint32_t max_frames = dest.info.frame_count < capacity_frames ? dest.info.frame_count : capacity_frames;
+    auto* output = static_cast<int16_t*>(dest.channels_output);
+
+    if (max_frames == 0) {
+        return RVReadInfo { format, 0, RVReadStatus_Ok };
+    }
+
+    // Surplus from an earlier batch comes first, so frames stay in order.
+    if (data->pending_frames > data->pending_read) {
+        uint32_t taken = drain_pending(data, output, max_frames);
+        return RVReadInfo { format, taken, RVReadStatus_Ok };
+    }
+
+    if (data->finished) {
+        return RVReadInfo { format, 0, RVReadStatus_Finished };
+    }
+
+    // Run emulator for one batch (play() caps at 20000 cycles internally)
     unsigned int cycles = max_frames * 21; // ~20.5 cycles/sample
     int samples = data->engine->play(cycles);
 
@@ -257,14 +311,22 @@ static RVReadInfo sidplayfp_read_data(void* user_data, RVReadData dest) {
     }
 
     if (samples == 0) {
+        data->finished = true;
         return RVReadInfo { format, 0, RVReadStatus_Finished };
     }
 
-    // Mix S16 stereo directly to output buffer
-    auto* output = static_cast<int16_t*>(dest.channels_output);
-    unsigned int mixed = data->engine->mix(output, static_cast<unsigned int>(samples));
+    // play() resets the chip buffer, so the whole batch has to be mixed now even when it
+    // overshoots the request. Mix into the staging buffer and hand out the request's share.
+    if (static_cast<unsigned int>(samples) > PENDING_FRAMES_MAX) {
+        samples = PENDING_FRAMES_MAX;
+    }
+    unsigned int mixed = data->engine->mix(data->pending, static_cast<unsigned int>(samples));
+    data->pending_frames = mixed / 2;
+    data->pending_read = 0;
 
-    return RVReadInfo { format, static_cast<uint16_t>(mixed / 2), RVReadStatus_Ok };
+    uint32_t taken = drain_pending(data, output, max_frames);
+
+    return RVReadInfo { format, taken, RVReadStatus_Ok };
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
