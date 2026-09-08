@@ -1,0 +1,9 @@
+[plugin]
+name = "sidplayfp"
+
+[data]
+entries = []
+
+[[fixtures]]
+file = "fixtures/retrovert_selftest.sid"
+sha256 = "5e8266396c60a232cd575caf15fadad136a1ec853e8537fcbef2440274e02936"
