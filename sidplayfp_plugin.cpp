@@ -37,6 +37,14 @@ RV_PLUGIN_USE_METADATA_API();
 // batch never exceeds ~976 frames; the rest is headroom.
 #define PENDING_FRAMES_MAX 2048
 
+// Cycles to clock per requested frame, rounded up from PAL's 20.53.
+#define CYCLES_PER_FRAME 21
+
+// Floor on a batch, in cycles. play() returns the frames a batch produced, and a budget
+// too small to cross the resampler's next output point produces none; ~12 frames' worth
+// keeps every batch productive no matter how few frames the host asked for.
+#define MIN_BATCH_CYCLES 256
+
 struct SidPlayData {
     sidplayfp* engine;
     SidTune* tune;
@@ -301,8 +309,14 @@ static RVReadInfo sidplayfp_read_data(void* user_data, RVReadData dest) {
         return RVReadInfo { format, 0, RVReadStatus_Finished };
     }
 
-    // Run emulator for one batch (play() caps at 20000 cycles internally)
-    unsigned int cycles = max_frames * 21; // ~20.5 cycles/sample
+    // Run emulator for one batch (play() caps at 20000 cycles internally). A zero return
+    // means the batch was too short to produce a frame, not that the tune ended -- the
+    // cycle-based play() has no end-of-tune signal, and SID tunes run until the host
+    // stops asking. Clocking a floor's worth of cycles keeps every batch productive.
+    unsigned int cycles = max_frames * CYCLES_PER_FRAME;
+    if (cycles < MIN_BATCH_CYCLES) {
+        cycles = MIN_BATCH_CYCLES;
+    }
     int samples = data->engine->play(cycles);
 
     if (samples < 0) {
@@ -311,6 +325,8 @@ static RVReadInfo sidplayfp_read_data(void* user_data, RVReadData dest) {
     }
 
     if (samples == 0) {
+        // Should not happen with the floor above; treat a stalled engine as the end
+        // rather than spinning.
         data->finished = true;
         return RVReadInfo { format, 0, RVReadStatus_Finished };
     }
