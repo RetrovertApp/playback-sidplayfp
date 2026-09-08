@@ -110,4 +110,12 @@ target_compile_definitions(sidplayfp_playback PRIVATE
     PACKAGE_URL="https://github.com/libsidplayfp/libsidplayfp"
 )
 
+# libsidplayfp's residfp filter tables spin up a std::thread, and with the
+# harness's -static-libstdc++ the static libstdc++ pulls pthread_create and
+# pthread_join in with it. On the glibc 2.28 release floor those live in
+# libpthread rather than libc, so the link needs it named; a modern host
+# links without it only because glibc has since folded them into libc.
+find_package(Threads REQUIRED)
+target_link_libraries(sidplayfp_playback PRIVATE Threads::Threads)
+
 rv_set_plugin_properties(sidplayfp_playback)
