@@ -98,6 +98,7 @@ target_include_directories(sidplayfp_playback PRIVATE
     ${LIBSIDPLAYFP_ROOT}/sidplayfp
     ${LIBSIDPLAYFP_ROOT}/builders/residfp-builder
     ${LIBSIDPLAYFP_ROOT}/builders/residfp-builder/residfp
+    ${LIBSIDPLAYFP_ROOT}/utils/MD5
 )
 
 # Compile definitions

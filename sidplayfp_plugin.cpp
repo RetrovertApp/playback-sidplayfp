@@ -18,10 +18,13 @@
 #include <sidplayfp/SidTune.h>
 #include <sidplayfp/SidTuneInfo.h>
 
+#include <romCheck.h>
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -44,6 +47,35 @@ RV_PLUGIN_USE_METADATA_API();
 // too small to cross the resampler's next output point produces none; ~12 frames' worth
 // keeps every batch productive no matter how few frames the host asked for.
 #define MIN_BATCH_CYCLES 256
+
+static const RVSettings* g_settings_api = nullptr;
+
+#define SETTINGS_REG_ID "sidplayfp"
+#define ID_C64_ROM_DIR "c64_rom_dir"
+
+// The settings API has no free-form string, so the directory is a one-choice string
+// range whose default "" means "no ROMs". Hosts may store any string.
+static RVSStringRangeValue s_rom_dir_values[] = {
+    { "none", "" },
+};
+
+static RVSetting s_settings[] = {
+    RVSStringValue_DescRange(ID_C64_ROM_DIR, "C64 ROM directory",
+                             "Directory with kernal.bin, basic.bin and chargen.bin. RSID tunes need the real "
+                             "KERNAL; BASIC tunes cannot play without BASIC.",
+                             "", s_rom_dir_values),
+};
+
+// C64 system ROMs, loaded once and shared by every engine. libsidplayfp only accepts
+// them as memory buffers; without a KERNAL it installs an RTS stub that renders many
+// RSID tunes as silence and gives BASIC tunes nothing to run at all.
+struct C64Roms {
+    std::vector<uint8_t> kernal;
+    std::vector<uint8_t> basic;
+    std::vector<uint8_t> chargen;
+};
+
+static C64Roms g_roms;
 
 struct SidPlayData {
     sidplayfp* engine;
@@ -70,6 +102,61 @@ static const char* sidplayfp_supported_extensions(void) {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+static bool read_rom(const char* dir, const char* name, size_t expected, std::vector<uint8_t>& out) {
+    char path[4096];
+    if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path)) {
+        return false;
+    }
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        rv_error("C64 ROM %s is missing", path);
+        return false;
+    }
+    std::vector<uint8_t> data(expected + 1);
+    size_t read = fread(data.data(), 1, data.size(), f);
+    fclose(f);
+    if (read != expected) {
+        rv_error("C64 ROM %s is not %zu bytes; ignoring it", path, expected);
+        return false;
+    }
+    data.resize(expected);
+    out.swap(data);
+    return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Loads the ROM set from the directory named by the c64_rom_dir setting. Empty means
+// no ROMs; a configured directory with missing or wrong-sized files is an error.
+static void load_c64_roms(void) {
+    g_roms = C64Roms();
+
+    if (!g_settings_api) {
+        return;
+    }
+    RVSStringResult setting = RVSettings_get_string(g_settings_api, SETTINGS_REG_ID, "", ID_C64_ROM_DIR);
+    if (setting.result != RVSettingsResult_Ok || !setting.value || !setting.value[0]) {
+        return;
+    }
+    const char* dir = setting.value;
+
+    if (!read_rom(dir, "kernal.bin", 0x2000, g_roms.kernal)) {
+        rv_error("C64 ROM directory %s has no usable kernal.bin; RSID tunes will play without a KERNAL", dir);
+        return;
+    }
+    read_rom(dir, "basic.bin", 0x2000, g_roms.basic);
+    read_rom(dir, "chargen.bin", 0x1000, g_roms.chargen);
+
+    // libsidplayfp knows the common images by md5; an unknown one still loads but is worth a note.
+    rv_info("C64 KERNAL from %s: %s", dir, libsidplayfp::kernalCheck(g_roms.kernal.data()).info());
+    if (!g_roms.basic.empty()) {
+        rv_info("C64 BASIC from %s: %s", dir, libsidplayfp::basicCheck(g_roms.basic.data()).info());
+    }
+    if (!g_roms.chargen.empty()) {
+        rv_info("C64 chargen from %s: %s", dir, libsidplayfp::chargenCheck(g_roms.chargen.data()).info());
+    }
+}
+
 static void* sidplayfp_create(const RVService* service_api) {
     (void)service_api;
 
@@ -77,6 +164,10 @@ static void* sidplayfp_create(const RVService* service_api) {
     memset(data, 0, sizeof(SidPlayData));
 
     data->engine = new sidplayfp();
+    if (!g_roms.kernal.empty()) {
+        data->engine->setRoms(g_roms.kernal.data(), g_roms.basic.empty() ? nullptr : g_roms.basic.data(),
+                              g_roms.chargen.empty() ? nullptr : g_roms.chargen.data());
+    }
     data->builder = new ReSIDfpBuilder("ReSIDfp");
 
     // Create SID emulators (support up to 3 SIDs for multi-SID tunes)
@@ -162,6 +253,20 @@ static int sidplayfp_open(void* user_data, const char* url, uint32_t subsong, co
 
     // Select subsong (0 = default starting song)
     data->tune->selectSong(subsong);
+
+    // BASIC tunes have nothing to run without the BASIC ROM, so refuse rather than
+    // render silence. Plain RSID tunes get libsidplayfp's KERNAL stub, which works for
+    // many of them, so only warn.
+    const SidTuneInfo* tune_info = data->tune->getInfo();
+    if (tune_info && tune_info->compatibility() == SidTuneInfo::COMPATIBILITY_BASIC && g_roms.basic.empty()) {
+        rv_error("BASIC tune needs the C64 BASIC and KERNAL ROMs; set the sidplayfp c64_rom_dir setting: %s", url);
+        delete data->tune;
+        data->tune = nullptr;
+        return -1;
+    }
+    if (tune_info && tune_info->compatibility() == SidTuneInfo::COMPATIBILITY_R64 && g_roms.kernal.empty()) {
+        rv_warn("RSID tune played with the KERNAL stub; it may render silence without C64 ROMs: %s", url);
+    }
 
     // Configure the engine
     SidConfig cfg;
@@ -439,6 +544,22 @@ static void sidplayfp_event(void* user_data, uint8_t* event_data, uint64_t len) 
 static void sidplayfp_static_init(const RVService* service_api) {
     rv_init_log_api(service_api);
     rv_init_metadata_api(service_api);
+
+    g_settings_api = RVService_get_settings(service_api, RV_SETTINGS_API_VERSION);
+    if (g_settings_api) {
+        RVSettings_register_array(g_settings_api, SETTINGS_REG_ID, s_settings);
+    }
+    load_c64_roms();
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+static RVSettingsUpdate sidplayfp_settings_updated(void* user_data, const RVService* service_api) {
+    (void)user_data;
+    (void)service_api;
+    // ROMs are bound to an engine at create time, so a new directory needs a reopen.
+    load_c64_roms();
+    return RVSettingsUpdate_RequireRestart;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -531,7 +652,7 @@ static RVPlaybackPlugin g_sidplayfp_plugin = {
     sidplayfp_seek,
     sidplayfp_metadata,
     sidplayfp_static_init,
-    nullptr, // settings_updated
+    sidplayfp_settings_updated,
     nullptr, // static_destroy
 
     // Visualization: metadata-only + scope (no pattern grid).
