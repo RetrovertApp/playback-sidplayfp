@@ -66,7 +66,7 @@ diff -ruN libsidplayfp-2.16.0/src/c64/c64.h libsidplayfp-2.16.0-patched/src/c64/
          return static_cast<uint_least32_t>((eventScheduler.getTime(EVENT_CLOCK_PHI1) * 1000) / cpuFrequency);
 diff -ruN libsidplayfp-2.16.0/src/player.cpp libsidplayfp-2.16.0-patched/src/player.cpp
 --- libsidplayfp-2.16.0/src/player.cpp	2025-12-23 15:57:36.000000000 +0100
-+++ libsidplayfp-2.16.0-patched/src/player.cpp	2026-09-16 21:05:09.879585303 +0200
++++ libsidplayfp-2.16.0-patched/src/player.cpp	2026-09-16 21:17:38.065229893 +0200
 @@ -254,8 +254,8 @@
          return -1;
      }
@@ -78,7 +78,7 @@ diff -ruN libsidplayfp-2.16.0/src/player.cpp libsidplayfp-2.16.0-patched/src/pla
      if (cycles > max_cycles)
      {
          cycles = max_cycles;
-@@ -263,7 +263,13 @@
+@@ -263,7 +263,19 @@
  
      try
      {
@@ -88,8 +88,14 @@ diff -ruN libsidplayfp-2.16.0/src/player.cpp libsidplayfp-2.16.0-patched/src/pla
 +        // whole CIA timer period. Run to a deadline on the scheduler's own
 +        // clock so the argument is the cycle count this call is documented to
 +        // take, and so the SIDs are never handed more audio than they can hold.
++        //
++        // An event may also be scheduled at the time it fires, which advances
++        // the clock by nothing, so the deadline alone does not guarantee this
++        // returns. The event ceiling does; it sits far above the two events per
++        // cycle the scheduler's half-cycle resolution allows.
 +        const event_clock_t deadline = m_c64.getTime() + cycles;
-+        while (m_c64.getTime() < deadline)
++        const unsigned int maxEvents = 4 * cycles + 1024;
++        for (unsigned int i = 0; i < maxEvents && m_c64.getTime() < deadline; i++)
              m_c64.clock();
  
          int sampleCount = 0;
