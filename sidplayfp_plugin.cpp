@@ -35,10 +35,11 @@
 RV_PLUGIN_USE_LOG_API();
 RV_PLUGIN_USE_METADATA_API();
 
-// Frames a single play() batch can generate. play() caps itself at 20000 cycles and the
-// slowest supported clock (PAL, 985248 Hz) needs ~20.5 cycles per frame at 48 kHz, so a
-// batch never exceeds ~976 frames; the rest is headroom.
-#define PENDING_FRAMES_MAX 2048
+// Frames a single play() batch can generate. play() caps itself at 20000 cycles, and the
+// event that carries it over that deadline can add a CIA timer period (65536 cycles) more.
+// At the slowest supported clock (PAL, 985248 Hz) that is ~4169 frames at 48 kHz; a batch
+// that has to wait on a timer is the only way to come near it, the usual one is ~976.
+#define PENDING_FRAMES_MAX 8192
 
 // Cycles to clock per requested frame, rounded up from PAL's 20.53.
 #define CYCLES_PER_FRAME 21

@@ -18,7 +18,7 @@ download_library(
     FILENAME "libsidplayfp-2.16.0.tar.gz"
     HASH "365c6381f4c43aebf47f1822cf242ef1666f10f9ba8efc23d238d47736532888"
     EXTRACT_DIR "libsidplayfp-2.16.0"
-    PATCHES patches/scope-capture.patch
+    PATCHES patches/scope-capture.patch patches/play-cycle-budget.patch
 )
 
 set(LIBSIDPLAYFP_ROOT "${sidplayfp_SOURCE_DIR}/src")

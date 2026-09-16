@@ -1,0 +1,152 @@
+diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.cpp
+--- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.cpp	2026-09-16 21:05:09.879606943 +0200
+@@ -102,7 +102,20 @@
+ {
+     const event_clock_t cycles = eventScheduler->getTime(EVENT_CLOCK_PHI1) - m_accessClk;
+     m_accessClk += cycles;
+-    m_bufferpos += m_sid.clock(cycles, m_buffer+m_bufferpos);
++
++    // Player::play() bounds the cycles that can reach us and the buffer is
++    // sized for that bound, so the split below should never happen. It is here
++    // so that a wrong bound costs samples rather than the heap.
++    const int space = m_bufferpos < m_bufferSize ? m_bufferSize - m_bufferpos : 0;
++    const event_clock_t room = static_cast<event_clock_t>(space * m_cyclesPerSample);
++    if (cycles > room)
++    {
++        m_bufferpos += m_sid.clock(static_cast<unsigned int>(room), m_buffer+m_bufferpos);
++        m_sid.clockSilent(static_cast<unsigned int>(cycles - room));
++        return;
++    }
++
++    m_bufferpos += m_sid.clock(static_cast<unsigned int>(cycles), m_buffer+m_bufferpos);
+ }
+ 
+ void ReSIDfp::filter(bool enable)
+@@ -142,9 +155,9 @@
+     if (m_buffer)
+         delete[] m_buffer;
+ 
+-    // 20ms buffer
+-    const int buffersize = std::ceil((freq / 1000.f) * 20.f);
+-    m_buffer = new short[buffersize];
++    m_bufferSize = bufferSizeFor(systemclock, freq);
++    m_buffer = new short[m_bufferSize];
++    m_cyclesPerSample = systemclock / freq;
+     m_status = true;
+ }
+ 
+diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.h libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.h
+--- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.h	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.h	2026-09-16 21:05:09.879620093 +0200
+@@ -43,6 +43,9 @@
+ private:
+     reSIDfp::SID &m_sid;
+ 
++    /// C64 cycles per output sample, for bounding the buffer append
++    float m_cyclesPerSample = 1.f;
++
+ public:
+     static const char* getCredits();
+ 
+diff -ruN libsidplayfp-2.16.0/src/c64/c64.h libsidplayfp-2.16.0-patched/src/c64/c64.h
+--- libsidplayfp-2.16.0/src/c64/c64.h	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/c64/c64.h	2026-09-16 21:05:09.879548554 +0200
+@@ -191,6 +191,11 @@
+      */
+     EventScheduler *getEventScheduler() { return &eventScheduler; }
+ 
++    /**
++     * Get the elapsed time in C64 cycles.
++     */
++    event_clock_t getTime() const { return eventScheduler.getTime(EVENT_CLOCK_PHI1); }
++
+     uint_least32_t getTimeMs() const
+     {
+         return static_cast<uint_least32_t>((eventScheduler.getTime(EVENT_CLOCK_PHI1) * 1000) / cpuFrequency);
+diff -ruN libsidplayfp-2.16.0/src/player.cpp libsidplayfp-2.16.0-patched/src/player.cpp
+--- libsidplayfp-2.16.0/src/player.cpp	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/player.cpp	2026-09-16 21:05:09.879585303 +0200
+@@ -254,8 +254,8 @@
+         return -1;
+     }
+ 
+-    // Limit to roughly 20ms
+-    constexpr unsigned int max_cycles = 20000;
++    // Limit to what the SID emus have buffer for
++    constexpr unsigned int max_cycles = sidemu::MAX_CYCLES;
+     if (cycles > max_cycles)
+     {
+         cycles = max_cycles;
+@@ -263,7 +263,13 @@
+ 
+     try
+     {
+-        for (unsigned int i = 0; i < cycles; i++)
++        // m_c64.clock() dispatches one scheduler event, not one cycle, and an
++        // event can carry time forward by anything from a single cycle to a
++        // whole CIA timer period. Run to a deadline on the scheduler's own
++        // clock so the argument is the cycle count this call is documented to
++        // take, and so the SIDs are never handed more audio than they can hold.
++        const event_clock_t deadline = m_c64.getTime() + cycles;
++        while (m_c64.getTime() < deadline)
+             m_c64.clock();
+ 
+         int sampleCount = 0;
+diff -ruN libsidplayfp-2.16.0/src/sidemu.h libsidplayfp-2.16.0-patched/src/sidemu.h
+--- libsidplayfp-2.16.0/src/sidemu.h	2025-12-23 15:57:36.000000000 +0100
++++ libsidplayfp-2.16.0-patched/src/sidemu.h	2026-09-16 21:05:09.879523304 +0200
+@@ -32,6 +32,7 @@
+ 
+ #include "sidcxx11.h"
+ 
++#include <cmath>
+ #include <string>
+ #include <bitset>
+ 
+@@ -53,6 +54,23 @@
+     static const char ERR_INVALID_SAMPLING[];
+     static const char ERR_INVALID_CHIP[];
+ 
++public:
++    /// Longest run, in C64 cycles, that Player::play() asks of a SID in one call.
++    static const int MAX_CYCLES = 20000;
++
++    /**
++     * How far past that budget the last dispatched event may carry it. A
++     * scheduler event advances time by anything from one cycle to a whole CIA
++     * timer period, and the timers are 16 bit.
++     */
++    static const int MAX_OVERSHOOT_CYCLES = 65536;
++
++    /// Samples one play() call can produce at the given clock and sample rate.
++    static int bufferSizeFor(float systemclock, float freq)
++    {
++        return static_cast<int>(std::ceil(((MAX_CYCLES + MAX_OVERSHOOT_CYCLES) * freq) / systemclock)) + 1;
++    }
++
+ protected:
+     EventScheduler *eventScheduler = nullptr;
+ 
+@@ -61,6 +79,9 @@
+     /// The sample buffer
+     short *m_buffer = nullptr;
+ 
++    /// Allocated length of m_buffer, in samples
++    int m_bufferSize = 0;
++
+     /// Current position in buffer
+     int m_bufferpos = 0;
+ 
+@@ -155,6 +176,11 @@
+      * Get the buffer.
+      */
+     short *buffer() const { return m_buffer; }
++
++    /**
++     * Get the allocated length of the buffer, in samples.
++     */
++    int bufferSize() const { return m_bufferSize; }
+ };
+ 
+ }
