@@ -633,7 +633,7 @@ static RVPlaybackPlugin g_sidplayfp_plugin = {
     RV_PLAYBACK_PLUGIN_API_VERSION,
     "sidplayfp",
     "0.0.1",
-    "libsidplayfp 2.16.0",
+    "libsidplayfp 3.1.1 + libresidfp 1.2.2",
     sidplayfp_probe_can_play,
     sidplayfp_supported_extensions,
     sidplayfp_create,
