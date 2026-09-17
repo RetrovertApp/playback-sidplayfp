@@ -169,15 +169,9 @@ static void* sidplayfp_create(const RVService* service_api) {
         data->engine->setRoms(g_roms.kernal.data(), g_roms.basic.empty() ? nullptr : g_roms.basic.data(),
                               g_roms.chargen.empty() ? nullptr : g_roms.chargen.data());
     }
+    // Since 3.0 the builder makes a SID emulation per chip as the engine locks
+    // it, so a multi-SID tune needs no pre-created pool here.
     data->builder = new ReSIDfpBuilder("ReSIDfp");
-
-    // Create SID emulators (support up to 3 SIDs for multi-SID tunes)
-    unsigned int maxsids = data->engine->info().maxsids();
-    data->builder->create(maxsids);
-
-    if (!data->builder->getStatus()) {
-        rv_error("Failed to create SID builder: %s", data->builder->error());
-    }
 
     return data;
 }
@@ -273,8 +267,6 @@ static int sidplayfp_open(void* user_data, const char* url, uint32_t subsong, co
     SidConfig cfg;
     cfg.frequency = FREQ;
     cfg.samplingMethod = SidConfig::INTERPOLATE;
-    cfg.fastSampling = false;
-    cfg.playback = SidConfig::STEREO;
     cfg.sidEmulation = data->builder;
 
     // Set default SID model based on tune info, or default to 6581

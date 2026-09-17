@@ -1,0 +1,142 @@
+diff -ruN libresidfp-1.2.2/src/residfp/residfp.cpp libresidfp-1.2.2-patched/src/residfp/residfp.cpp
+--- libresidfp-1.2.2/src/residfp/residfp.cpp	2026-08-30 16:36:38.000000000 +0200
++++ libresidfp-1.2.2-patched/src/residfp/residfp.cpp	2026-09-17 07:20:24.395294290 +0200
+@@ -189,3 +189,18 @@
+ {
+     sid.setDCBRes(res);
+ }
++
++const short* residfp::getVoiceBuffer(int voiceNum) const
++{
++    return sid.getVoiceBuffer(voiceNum);
++}
++
++int residfp::getVoiceBufferPos() const
++{
++    return sid.getVoiceBufferPos();
++}
++
++int residfp::getVoiceBufferSize() const
++{
++    return SID::getVoiceBufferSize();
++}
+diff -ruN libresidfp-1.2.2/src/residfp/residfp.h libresidfp-1.2.2-patched/src/residfp/residfp.h
+--- libresidfp-1.2.2/src/residfp/residfp.h	2026-08-30 16:36:38.000000000 +0200
++++ libresidfp-1.2.2-patched/src/residfp/residfp.h	2026-09-17 07:20:24.395272950 +0200
+@@ -310,6 +310,22 @@
+      * @since 1.2
+      */
+     void setDCBRes(double res);
++
++    /**
++     * Get the per-voice scope buffer for waveform visualization.
++     * Samples are the voice waveform times its envelope, taken before the
++     * filter and decimated to the sampling frequency last configured.
++     *
++     * @param voiceNum voice number (0-2)
++     * @return pointer to the voice buffer, or nullptr if out of range
++     */
++    const short* getVoiceBuffer(int voiceNum) const;
++
++    /// Get the write position shared by the three voice buffers.
++    int getVoiceBufferPos() const;
++
++    /// Get the length of one voice buffer.
++    int getVoiceBufferSize() const;
+ };
+ 
+ }
+diff -ruN libresidfp-1.2.2/src/SID.cpp libresidfp-1.2.2-patched/src/SID.cpp
+--- libresidfp-1.2.2/src/SID.cpp	2026-08-30 16:36:38.000000000 +0200
++++ libresidfp-1.2.2-patched/src/SID.cpp	2026-09-17 07:20:10.011173159 +0200
+@@ -532,6 +532,10 @@
+ {
+     externalFilter.setClockFrequency(clockFrequency);
+ 
++    // One scope sample per audio output sample.
++    voiceScopeDecimation = static_cast<int>(clockFrequency / samplingFrequency);
++    if (voiceScopeDecimation < 1) voiceScopeDecimation = 1;
++
+     switch (method)
+     {
+     case DECIMATE:
+diff -ruN libresidfp-1.2.2/src/SID.h libresidfp-1.2.2-patched/src/SID.h
+--- libresidfp-1.2.2/src/SID.h	2026-08-30 16:36:38.000000000 +0200
++++ libresidfp-1.2.2-patched/src/SID.h	2026-09-17 07:20:10.011120999 +0200
+@@ -132,6 +132,14 @@
+      */
+     float oscDAC[4096];
+ 
++    /// Per-voice output buffers for waveform visualization (decimated to audio rate)
++    static constexpr int VOICE_BUFFER_SIZE = 4096;
++    int16_t voiceBuffer[3][VOICE_BUFFER_SIZE] = {};
++    int voiceBufferPos = 0;
++
++    int voiceScopeDecimation = 20;   ///< Clock ticks per scope sample (set by setSamplingParameters)
++    int voiceScopeCounter = 0;       ///< Decimation counter
++
+     /// Parameters for save state
+     Params* p;
+ 
+@@ -167,6 +175,28 @@
+         voice[2].envelope()->clock();
+     }
+ 
++    /**
++     * Capture per-voice output, decimated to roughly the audio sample rate.
++     * Runs on the waveform and envelope state the current tick just produced,
++     * before the filter, so a scope shows the voice rather than the mix.
++     */
++    inline void captureVoiceScope()
++    {
++        if (++voiceScopeCounter < voiceScopeDecimation)
++            return;
++
++        voiceScopeCounter = 0;
++        auto voiceOut = [](Voice& v) -> int16_t {
++            const int wav = static_cast<int>(v.wave()->output()) - 2048;
++            const int env = v.envelope()->output();
++            return static_cast<int16_t>((wav * env) / 8);
++        };
++        voiceBuffer[0][voiceBufferPos] = voiceOut(voice[0]);
++        voiceBuffer[1][voiceBufferPos] = voiceOut(voice[1]);
++        voiceBuffer[2][voiceBufferPos] = voiceOut(voice[2]);
++        voiceBufferPos = (voiceBufferPos + 1) & (VOICE_BUFFER_SIZE - 1);
++    }
++
+     /// clock internal and external filters
+     inline int32_t clockFilt()
+     {
+@@ -378,6 +408,24 @@
+      * Set the DC-Blocker resistance.
+      */
+     void setDCBRes(double res);
++
++    /**
++     * Get the per-voice scope buffer for waveform visualization.
++     *
++     * @param voiceNum voice number (0-2)
++     * @return pointer to the voice buffer, or nullptr if out of range
++     */
++    const int16_t* getVoiceBuffer(int voiceNum) const
++    {
++        if (voiceNum < 0 || voiceNum > 2) return nullptr;
++        return voiceBuffer[voiceNum];
++    }
++
++    /// Get the write position shared by the three voice buffers.
++    int getVoiceBufferPos() const { return voiceBufferPos; }
++
++    /// Get the length of one voice buffer.
++    static constexpr int getVoiceBufferSize() { return VOICE_BUFFER_SIZE; }
+ };
+ 
+ } // namespace reSIDfp
+@@ -424,6 +472,7 @@
+             {
+                 clockWaveGen();
+                 clockEnvGen();
++                captureVoiceScope();
+ 
+                 int32_t output = clockFilt();
+                 if (unlikely(resampler->input(output)))

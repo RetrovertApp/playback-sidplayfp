@@ -1,7 +1,7 @@
-diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.cpp
---- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp	2025-12-23 15:57:36.000000000 +0100
-+++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.cpp	2026-09-16 21:05:09.879606943 +0200
-@@ -102,7 +102,20 @@
+diff -ruN libsidplayfp-3.1.1/src/builders/residfp-builder/residfp-emu.cpp libsidplayfp-3.1.1-patched/src/builders/residfp-builder/residfp-emu.cpp
+--- libsidplayfp-3.1.1/src/builders/residfp-builder/residfp-emu.cpp	2026-08-30 16:48:13.000000000 +0200
++++ libsidplayfp-3.1.1-patched/src/builders/residfp-builder/residfp-emu.cpp	2026-09-17 07:22:06.302428897 +0200
+@@ -94,7 +94,20 @@
  {
      const event_clock_t cycles = eventScheduler->getTime(EVENT_CLOCK_PHI1) - m_accessClk;
      m_accessClk += cycles;
@@ -22,8 +22,8 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp libsi
 +    m_bufferpos += m_sid.clock(static_cast<unsigned int>(cycles), m_buffer+m_bufferpos);
  }
  
- void ReSIDfp::filter(bool enable)
-@@ -142,9 +155,9 @@
+ void reSIDfpEmu::sampling(float systemclock, float freq,
+@@ -126,9 +139,9 @@
      if (m_buffer)
          delete[] m_buffer;
  
@@ -36,12 +36,12 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.cpp libsi
      m_status = true;
  }
  
-diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.h libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.h
---- libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.h	2025-12-23 15:57:36.000000000 +0100
-+++ libsidplayfp-2.16.0-patched/src/builders/residfp-builder/residfp-emu.h	2026-09-16 21:05:09.879620093 +0200
+diff -ruN libsidplayfp-3.1.1/src/builders/residfp-builder/residfp-emu.h libsidplayfp-3.1.1-patched/src/builders/residfp-builder/residfp-emu.h
+--- libsidplayfp-3.1.1/src/builders/residfp-builder/residfp-emu.h	2026-08-30 16:48:13.000000000 +0200
++++ libsidplayfp-3.1.1-patched/src/builders/residfp-builder/residfp-emu.h	2026-09-17 07:22:06.299732725 +0200
 @@ -43,6 +43,9 @@
  private:
-     reSIDfp::SID &m_sid;
+     reSIDfp::residfp &m_sid;
  
 +    /// C64 cycles per output sample, for bounding the buffer append
 +    float m_cyclesPerSample = 1.f;
@@ -49,9 +49,9 @@ diff -ruN libsidplayfp-2.16.0/src/builders/residfp-builder/residfp-emu.h libsidp
  public:
      static const char* getCredits();
  
-diff -ruN libsidplayfp-2.16.0/src/c64/c64.h libsidplayfp-2.16.0-patched/src/c64/c64.h
---- libsidplayfp-2.16.0/src/c64/c64.h	2025-12-23 15:57:36.000000000 +0100
-+++ libsidplayfp-2.16.0-patched/src/c64/c64.h	2026-09-16 21:05:09.879548554 +0200
+diff -ruN libsidplayfp-3.1.1/src/c64/c64.h libsidplayfp-3.1.1-patched/src/c64/c64.h
+--- libsidplayfp-3.1.1/src/c64/c64.h	2026-08-30 16:48:13.000000000 +0200
++++ libsidplayfp-3.1.1-patched/src/c64/c64.h	2026-09-17 07:22:06.301737822 +0200
 @@ -191,6 +191,11 @@
       */
      EventScheduler *getEventScheduler() { return &eventScheduler; }
@@ -64,21 +64,21 @@ diff -ruN libsidplayfp-2.16.0/src/c64/c64.h libsidplayfp-2.16.0-patched/src/c64/
      uint_least32_t getTimeMs() const
      {
          return static_cast<uint_least32_t>((eventScheduler.getTime(EVENT_CLOCK_PHI1) * 1000) / cpuFrequency);
-diff -ruN libsidplayfp-2.16.0/src/player.cpp libsidplayfp-2.16.0-patched/src/player.cpp
---- libsidplayfp-2.16.0/src/player.cpp	2025-12-23 15:57:36.000000000 +0100
-+++ libsidplayfp-2.16.0-patched/src/player.cpp	2026-09-16 21:17:38.065229893 +0200
-@@ -254,8 +254,8 @@
-         return -1;
-     }
+diff -ruN libsidplayfp-3.1.1/src/player.cpp libsidplayfp-3.1.1-patched/src/player.cpp
+--- libsidplayfp-3.1.1/src/player.cpp	2026-08-30 16:48:13.000000000 +0200
++++ libsidplayfp-3.1.1-patched/src/player.cpp	2026-09-17 07:22:06.302057660 +0200
+@@ -58,8 +58,8 @@
+ const char ERR_BAD_BUF_SIZE[]         = "SIDPLAYER ERROR: Bad buffer size";
+ const char ERR_INVALID_CONF[]         = "SIDPLAYER ERROR: Invalid configuration";
  
--    // Limit to roughly 20ms
--    constexpr unsigned int max_cycles = 20000;
-+    // Limit to what the SID emus have buffer for
-+    constexpr unsigned int max_cycles = sidemu::MAX_CYCLES;
-     if (cycles > max_cycles)
-     {
-         cycles = max_cycles;
-@@ -263,7 +263,19 @@
+-// Limit to roughly 20ms
+-constexpr unsigned int MAX_CYCLES = 20000;
++// Limit to what the SID emus have buffer for
++constexpr unsigned int MAX_CYCLES = sidemu::MAX_CYCLES;
+ 
+ /**
+  * Configuration error exception.
+@@ -254,7 +254,19 @@
  
      try
      {
@@ -99,9 +99,9 @@ diff -ruN libsidplayfp-2.16.0/src/player.cpp libsidplayfp-2.16.0-patched/src/pla
              m_c64.clock();
  
          int sampleCount = 0;
-diff -ruN libsidplayfp-2.16.0/src/sidemu.h libsidplayfp-2.16.0-patched/src/sidemu.h
---- libsidplayfp-2.16.0/src/sidemu.h	2025-12-23 15:57:36.000000000 +0100
-+++ libsidplayfp-2.16.0-patched/src/sidemu.h	2026-09-16 21:05:09.879523304 +0200
+diff -ruN libsidplayfp-3.1.1/src/sidemu.h libsidplayfp-3.1.1-patched/src/sidemu.h
+--- libsidplayfp-3.1.1/src/sidemu.h	2026-08-30 16:48:13.000000000 +0200
++++ libsidplayfp-3.1.1-patched/src/sidemu.h	2026-09-17 07:22:06.301402614 +0200
 @@ -32,6 +32,7 @@
  
  #include "sidcxx11.h"
@@ -144,7 +144,7 @@ diff -ruN libsidplayfp-2.16.0/src/sidemu.h libsidplayfp-2.16.0-patched/src/sidem
      /// Current position in buffer
      int m_bufferpos = 0;
  
-@@ -155,6 +176,11 @@
+@@ -154,6 +175,11 @@
       * Get the buffer.
       */
      short *buffer() const { return m_buffer; }
